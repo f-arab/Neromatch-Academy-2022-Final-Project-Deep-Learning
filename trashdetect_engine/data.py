@@ -1,61 +1,86 @@
-"""
-COCOObjectDetection dataset which returns image_id for evaluation.
-
-Mostly copy-paste from:
-https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
-"""
+import os
+from PIL import Image
+import numpy as np
 import torch
 import torch.utils.data
 import torchvision
 from pycocotools import mask as coco_mask
 from pycocotools.coco import COCO
-
 from . import transforms as T
+import albumentations as A
 
 
-class DetectWasteMultiDataset(torchvision.datasets.CocoDetection):
-    def __init__(self, img_folder, ann_file, transforms, return_masks=True):
-        super(DetectWasteMultiDataset, self).__init__(img_folder, ann_file)
-        self._transforms = transforms
+class DetectWasteMultiDataset(torch.utils.data.Dataset):
+    def __init__(
+        self, img_folder, ann_file, transforms, min_size=720, return_masks=True
+    ):
+        super().__init__()
+
+        self.img_folder = img_folder
+        self.coco = COCO(ann_file)
+        self.ids = list(sorted(self.coco.imgs.keys()))
+        self.transforms = transforms
+        self.min_size = min_size
         self.convert_poly_to_mask = ConvertCocoPolysToMask(return_masks)
 
-    # def __len__(self):
-    #     return 10
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    def _load_image(self, id: int):
+        path = self.coco.loadImgs(id)[0]["file_name"]
+        return Image.open(os.path.join(self.img_folder, path)).convert("RGB")
+
+    def _load_target(self, id: int):
+        return self.coco.loadAnns(self.coco.getAnnIds(id))
 
     def __getitem__(self, idx):
         image_id = self.ids[idx]
-        img = self._load_image(image_id)
+        image = self._load_image(image_id)
         target = self._load_target(image_id)
-        if self.transforms is not None:
-            image, target = self.transforms(img, target)
-
-        # image_id = self.ids[idx]
         target = {"image_id": image_id, "annotations": target}
 
         # Add mask annotation in the "target"
-        img, target = self.convert_poly_to_mask(img, target)
+        image, target = self.convert_poly_to_mask(image, target)
 
-        if self._transforms is not None:
+        if self.transforms is not None:
             """
             image_dict = {'image': numpy.asarray(img),
                           'bboxes': target['boxes'],
-                          'mask': numpy.asarray(target['masks']),
+                          'masks': numpy.asarray(target['masks']),
                           'labels': target['labels']}
             image_dict = self._transforms(**image_dict)
             img = torch.as_tensor(image_dict['image'])
             target['boxes'] = torch.as_tensor(image_dict['bboxes'])
             target['masks'] = torch.as_tensor(image_dict['mask'])
             """
-            img, target = self._transforms(img, target)
-        return img, target
+            image, target = self.transforms(image, target)
+        return image, target
 
 
 class ConvertCocoPolysToMask(object):
     def __init__(self, return_masks=True):
         self.return_masks = return_masks
 
+    @classmethod
+    def convert_coco_poly_to_mask(cls, segmentations, height, width):
+        masks = []
+        for polygons in segmentations:
+            rles = coco_mask.frPyObjects(polygons, height, width)
+            mask = coco_mask.decode(rles)
+            if len(mask.shape) < 3:
+                mask = mask[..., None]
+            mask = torch.as_tensor(mask, dtype=torch.uint8)
+            mask = mask.any(dim=2)
+            masks.append(mask)
+        if masks:
+            masks = torch.stack(masks, dim=0)
+        else:
+            masks = torch.zeros((0, height, width), dtype=torch.uint8)
+        return masks
+
     def __call__(self, image, target):
         w, h = image.size
+        image = np.asarray(image)
 
         image_id = target["image_id"]
         image_id = torch.tensor([image_id])
@@ -66,7 +91,7 @@ class ConvertCocoPolysToMask(object):
 
         boxes = [obj["bbox"] for obj in anno]
         # guard against no boxes via resizing
-        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+        boxes = torch.as_tensor(boxes, dtype=torch.int32).reshape(-1, 4)
         boxes[:, 2:] += boxes[:, :2]
         boxes[:, 0::2].clamp_(min=0, max=w)
         boxes[:, 1::2].clamp_(min=0, max=h)
@@ -76,7 +101,7 @@ class ConvertCocoPolysToMask(object):
 
         if self.return_masks:
             segmentations = [obj["segmentation"] for obj in anno]
-            masks = convert_coco_poly_to_mask(segmentations, h, w)
+            masks = self.convert_coco_poly_to_mask(segmentations, h, w)
 
         keypoints = None
         if anno and "keypoints" in anno[0]:
@@ -117,21 +142,39 @@ class ConvertCocoPolysToMask(object):
         return image, target
 
 
-def convert_coco_poly_to_mask(segmentations, height, width):
-    masks = []
-    for polygons in segmentations:
-        rles = coco_mask.frPyObjects(polygons, height, width)
-        mask = coco_mask.decode(rles)
-        if len(mask.shape) < 3:
-            mask = mask[..., None]
-        mask = torch.as_tensor(mask, dtype=torch.uint8)
-        mask = mask.any(dim=2)
-        masks.append(mask)
-    if masks:
-        masks = torch.stack(masks, dim=0)
-    else:
-        masks = torch.zeros((0, height, width), dtype=torch.uint8)
-    return masks
+def get_transform(mode):
+    transforms = []
+    # converts the image, a PIL image, into a PyTorch Tensor
+    transforms.append(T.ToTensor())
+    if mode == "train":
+        # during training, randomly flip the training images
+        # and ground-truth for data augmentation
+        transforms.append(T.RandomHorizontalFlip(0.5))
+    return T.Compose(transforms)
+
+
+def build(
+    image_set: str,
+    images_path: str,
+    annotation_path: str,
+    return_masks: bool = True,
+    max_size=None,
+):
+    assert image_set in ["train", "val", "test"]
+    PATHS = {
+        "train": (images_path, f"{annotation_path}_train.json"),
+        "val": (images_path, f"{annotation_path}_test.json"),
+        "test": (images_path, f"{annotation_path}_test.json"),
+    }
+
+    img_folder, ann_file = PATHS[image_set]
+    dataset = DetectWasteMultiDataset(
+        img_folder,
+        ann_file,
+        transforms=get_transform(mode=image_set),
+        return_masks=return_masks,
+    )
+    return dataset
 
 
 def convert_to_coco_api(ds):
@@ -196,26 +239,40 @@ def get_coco_api_from_dataset(dataset):
     return convert_to_coco_api(dataset)
 
 
-def get_transform(train):
-    transforms = []
-    transforms.append(T.ToTensor())  # -> [0, 1]
-    if train == "train":
-        transforms.append(T.RandomHorizontalFlip(0.5))
-    return T.Compose(transforms)
+# ===============================================================================
+# **Pytorch Lightning Adoption**
+# ===============================================================================
+import pytorch_lightning as pl
+from torch.utils.data import DataLoader
+from trashdetect_engine import utils
 
 
-def build(image_set, images_path, annotation_path, return_masks=True):
-    PATHS = {
-        "train": (images_path, f"{annotation_path}_train.json"),
-        "val": (images_path, f"{annotation_path}_test.json"),
-        "test": (images_path, f"{annotation_path}_test.json"),
-    }
+class WasteDatasetDL(pl.LightningDataModule):
+    def __init__(self, args, return_masks=True):
+        super().__init__()
+        self.args = args
+        self.return_masks = return_masks
+        self.dataset_train = build(
+            "train", self.args.images_dir, self.args.anno_name, self.return_masks
+        )
+        self.dataset_val = build(
+            "val", self.args.images_dir, self.args.anno_name, self.return_masks
+        )
 
-    img_folder, ann_file = PATHS[image_set]
-    dataset = DetectWasteMultiDataset(
-        img_folder,
-        ann_file,
-        transforms=get_transform(image_set),
-        return_masks=return_masks,
-    )
-    return dataset
+    def train_dataloader(self):
+        return DataLoader(
+            self.dataset_train,
+            batch_size=self.args.batch_size,
+            shuffle=True,
+            num_workers=self.args.num_workers,
+            collate_fn=utils.collate_fn,
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.dataset_val,
+            batch_size=self.args.test_batch_size,
+            shuffle=False,
+            num_workers=self.args.num_workers,
+            collate_fn=utils.collate_fn,
+        )

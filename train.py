@@ -2,7 +2,7 @@ import time
 import os
 import torch
 from trashdetect_engine.engine import train_one_epoch, evaluate
-import argparse
+
 from trashdetect_engine import utils
 
 from trashdetect_engine.data import build
@@ -13,6 +13,8 @@ from trashdetect_engine.models.segmentation_models import (
 from datetime import datetime
 from pathlib import Path
 
+import argparse
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser(
@@ -21,7 +23,7 @@ def get_args_parser():
     parser.add_argument(
         "--output_dir",
         help="path to save checkpoints",
-        default="/mnt/ssd1T/TACO/detect-waste/MaskRCNN/output",
+        default=f"/mnt/ssd1T/TACO/detect-waste/MaskRCNN/output",
         type=str,
     )
     parser.add_argument(
@@ -105,15 +107,21 @@ def get_args_parser():
 def train(args):
     start_epoch = 0
     return_masks = False
+
+    experiment_name = utils.generate_datetime()
+
+    args.output_dir = os.path.join(args.output_dir, experiment_name)
+    os.makedirs(args.output_dir, exist_ok=True)
+
     if args.wandb and (not args.resume):
         import wandb
 
         exp_logger = wandb.init(
             project="wastedetect",
             entity="nma2022-wastedetect",
-            name=f"experiment_{utils.generate_datetime()}",
+            name=f"experiment-{utils.generate_datetime()}-congvm-bs_{args.batch_size}-lr_{args.lr}",
         )
-        wandb.config = vars(args)
+        wandb.config.update(args)  # adds all of the arguments as config variables
 
     else:
         exp_logger = None
@@ -134,8 +142,13 @@ def train(args):
         shuffle=True,
         num_workers=args.num_workers,
         collate_fn=utils.collate_fn,
-        pin_memory=True
+        pin_memory=True,
     )
+
+    # DEBUG
+    for batch in data_loader:
+        break
+    # import mipkit;mipkit.debug.set_trace();exit();
 
     data_loader_test = torch.utils.data.DataLoader(
         dataset_val,
@@ -143,7 +156,7 @@ def train(args):
         shuffle=False,
         num_workers=args.num_workers,
         collate_fn=utils.collate_fn,
-        pin_memory=True
+        pin_memory=True,
     )
 
     # define model
@@ -252,11 +265,18 @@ def train(args):
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print("Training time {}".format(total_time_str))
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     parser = get_args_parser()
+
     args = parser.parse_args()
     args.lr = 0.001
-    for bs in [2, 4, 8]:
-        print('Run with args: ', args)
-        args.batch_size = bs
-        train(args)
+    args.batch_size = 4
+    args.optimizer = "AdamW"
+    args.test_batch_size = 2
+    args.test_only = True
+    args.anno_name = '/mnt/ssd1T/TACO/trashdetect_engine_v2/annotations/annotations_binary'
+    # for bs in [2, 4, 8, 16]:
+    # print("Run with args: ", args)
+    # args.batch_size = bs
+    train(args)

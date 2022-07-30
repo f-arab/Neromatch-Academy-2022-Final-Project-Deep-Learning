@@ -1,6 +1,5 @@
+from typing import List
 import json
-import tempfile
-
 import numpy as np
 import copy
 import time
@@ -17,7 +16,7 @@ from trashdetect_engine import utils
 
 
 class CocoEvaluator(object):
-    def __init__(self, coco_gt, iou_types):
+    def __init__(self, coco_gt: COCO, iou_types: List[str]):
         assert isinstance(iou_types, (list, tuple))
         coco_gt = copy.deepcopy(coco_gt)
         self.coco_gt = coco_gt
@@ -58,7 +57,7 @@ class CocoEvaluator(object):
 
     def summarize(self):
         for iou_type, coco_eval in self.coco_eval.items():
-            print("IoU metric: {}".format(iou_type))
+            print(f"IoU metric: {iou_type}")
             coco_eval.summarize()
 
     def prepare(self, predictions, iou_type):
@@ -69,7 +68,7 @@ class CocoEvaluator(object):
         elif iou_type == "keypoints":
             return self.prepare_for_coco_keypoint(predictions)
         else:
-            raise ValueError("Unknown iou type {}".format(iou_type))
+            raise ValueError(f"Unknown iou type {iou_type}")
 
     def prepare_for_coco_detection(self, predictions):
         coco_results = []
@@ -111,7 +110,9 @@ class CocoEvaluator(object):
             labels = prediction["labels"].tolist()
 
             rles = [
-                mask_util.encode(np.array(mask[0, :, :, np.newaxis], order="F"))[0]
+                mask_util.encode(
+                    np.array(mask[0, :, :, np.newaxis], dtype=np.uint8, order="F")
+                )[0]
                 for mask in masks
             ]
             for rle in rles:
@@ -294,15 +295,27 @@ def loadRes(self, resFile):
             s = ann["keypoints"]
             x = s[0::3]
             y = s[1::3]
-            x0, x1, y0, y1 = np.min(x), np.max(x), np.min(y), np.max(y)
-            ann["area"] = (x1 - x0) * (y1 - y0)
+            x1, x2, y1, y2 = np.min(x), np.max(x), np.min(y), np.max(y)
+            ann["area"] = (x2 - x1) * (y2 - y1)
             ann["id"] = id + 1
-            ann["bbox"] = [x0, y0, x1 - x0, y1 - y0]
+            ann["bbox"] = [x1, y1, x2 - x1, y2 - y1]
     # print('DONE (t={:0.2f}s)'.format(time.time()- tic))
 
     res.dataset["annotations"] = anns
     createIndex(res)
     return res
+
+
+# from contextlib import redirect_stdout
+# import io
+
+
+# def evaluate(imgs):
+#     with redirect_stdout(io.StringIO()):
+#         imgs.evaluate()
+#     return imgs.params.imgIds, np.asarray(imgs.evalImgs).reshape(
+#         -1, len(imgs.params.areaRng), len(imgs.params.imgIds)
+#     )
 
 
 def evaluate(self):
@@ -352,7 +365,7 @@ def evaluate(self):
     evalImgs = np.asarray(evalImgs).reshape(len(catIds), len(p.areaRng), len(p.imgIds))
     self._paramsEval = copy.deepcopy(self.params)
     # toc = time.time()
-    # print('DONE (t={:0.2f}s).'.format(toc-tic))
+    # print("DONE (t={:0.2f}s).".format(toc - tic))
     return p.imgIds, evalImgs
 
 

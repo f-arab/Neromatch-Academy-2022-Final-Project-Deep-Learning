@@ -198,7 +198,7 @@ class MetricLogger(object):
                 "{meters}",
                 "time: {time}",
                 "data: {data}",
-                "max mem: {memory:.0f}",
+                "max_mem: {memory:.0f}",
             ]
         )
         MB = 1024.0 * 1024.0

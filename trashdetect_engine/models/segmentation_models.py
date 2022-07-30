@@ -1,11 +1,13 @@
+from django.urls import include
 import torchvision
 import torch
-from torchvision.models.detection import MaskRCNN
-# from .detection.mask_rcnn import MaskRCNN
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
+from .detection.mask_rcnn import MaskRCNN
+from .detection.faster_rcnn import FastRCNNPredictor
+from .detection.mask_rcnn import MaskRCNNPredictor
 
 from efficientnet_pytorch import EfficientNet
+
+from trashdetect_engine.models.backbone import resnet
 
 # from https://github.com/lukemelas/EfficientNet-PyTorch
 def round_filters(filters, global_params):
@@ -25,7 +27,9 @@ def round_filters(filters, global_params):
     return int(new_filters)
 
 
-def get_instance_segmentation_model(num_classes, model_name="maskrcnn_resnet50_fpn"):
+def get_instance_segmentation_model(
+    num_classes, model_name="maskrcnn_resnet50_fpn", max_size=512, min_size=512
+):
     # load a pre-trained model for classification
     # and return only the features
     if model_name.startswith("efficientnet"):
@@ -34,15 +38,25 @@ def get_instance_segmentation_model(num_classes, model_name="maskrcnn_resnet50_f
         )
         # number of output channels
         backbone.out_channels = int(round_filters(1280, backbone._global_params))
-        model = MaskRCNN(backbone, num_classes)
+        model = MaskRCNN(backbone, num_classes, min_size=min_size, max_size=max_size)
     else:
         # load an instance segmentation model pre-trained on COCO
-        model = torchvision.models.detection.__dict__[model_name](pretrained=True)
+        model = torchvision.models.detection.__dict__[model_name](
+            pretrained=True, min_size=min_size, max_size=max_size
+        )
+        # backbone = resnet.resnet50(pretrained=True, include_top=False)
+        # backbone.out_channels = (
+        #     2048  # int(round_filters(1280, backbone._global_params))
+        # )
+
+    # model = MaskRCNN(backbone, num_classes, min_size=min_size, max_size=max_size)
 
     # get the number of input features for the classifier
     in_features = model.roi_heads.box_predictor.cls_score.in_features
+
     # replace the pre-trained head with a new one
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+
     if model_name.startswith("mask") or model_name.startswith("efficientnet"):
         # now get the number of input features for the mask classifier
         in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
